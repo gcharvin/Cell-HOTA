@@ -686,7 +686,7 @@ class HOTA(_BaseMetric):
                         if num_div_matches == 0 or gt_parent_t_unique not in gt_parents_t_match_unique or not div_matches_alpha[np.where(gt_parents_t_match_unique == gt_parent_t_unique)[0][0]]:
                             res['Div_FN_ID'][t][a].extend(gt_ids_t[gt_parents_t == gt_parent_t_unique]) 
 
-                assert gt_num_divs - num_div_matches == len(res['Div_FN_ID'][t][a]) // 2
+                # Budding datasets can yield a single child per parent; avoid enforcing a 2-child division invariant.
 
                 # Save cell ID where a FP cell division occurred; This is just for display purposes
                 if tracker_num_divs - num_div_matches > 0:
@@ -726,7 +726,7 @@ class HOTA(_BaseMetric):
                         if num_div_matches == 0 or tracker_parent_t_unique not in tracker_parents_t_match_unique or not div_matches_alpha[np.where(tracker_parents_t_match_unique == tracker_parent_t_unique)[0][0]]:
                             res['Div_FP_ID'][t][a].extend(tracker_ids_t[tracker_parents_t == tracker_parent_t_unique]) 
 
-                assert tracker_num_divs - num_div_matches == len(res['Div_FP_ID'][t][a]) // 2
+                # Budding datasets can yield a single child per parent; avoid enforcing a 2-child division invariant.
 
             prev_matches = [match_rows, match_cols]
 
