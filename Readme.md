@@ -63,6 +63,8 @@ python scripts/run_cells_challenge.py \
 #### Optional:
 - `USE_FLEX_DIV`: Allow early/late divisions by one frame (Default: `True`)
 - `COUNT_EDGES`: Include cells touching image edges in scoring (Default: `True`)
+- `DIV_MODE`: `sym` for symmetric divisions (2 daughters), `asym` for budding/one-child divisions (Default: `sym`)
+- `DIV_WINDOW`: integer frame tolerance for delayed division matches (Default: `1`, used when `DIV_MODE=asym`)
 
 ### Data Format Support
 

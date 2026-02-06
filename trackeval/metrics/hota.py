@@ -12,7 +12,7 @@ class HOTA(_BaseMetric):
     See: https://link.springer.com/article/10.1007/s11263-020-01375-2
     """
 
-    def __init__(self, flex_div=False, config=None):
+    def __init__(self, flex_div=False, div_mode='sym', div_window=1, config=None):
         super().__init__()
         self.plottable = True
         self.array_labels = np.arange(0.05, 0.99, 0.05)
@@ -24,6 +24,10 @@ class HOTA(_BaseMetric):
         self.fields = self.float_array_fields + self.integer_array_fields + self.float_fields
         self.summary_fields = self.float_array_fields + self.float_fields
         self.flex_div = flex_div
+        self.div_mode = str(div_mode).lower()
+        if self.div_mode not in ['sym', 'asym']:
+            raise ValueError(f"div_mode must be 'sym' or 'asym', got: {div_mode}")
+        self.div_window = max(0, int(div_window))
 
     @_timing.time
     def eval_sequence(self, data):
@@ -488,26 +492,31 @@ class HOTA(_BaseMetric):
 
             # Get matches where both matching cells divded at time t
             div_matches = (gt_parents_t[match_rows_track] != -1) * (tracker_parents_t[match_cols_track] != -1)
+            div_pairs_gt = np.array([], dtype=int)
+            div_pairs_tr = np.array([], dtype=int)
+            iou_div = np.array([], dtype=float)
+            late_div_found = False
 
             # If there is at least one set of matching cells that divide at time t
             if div_matches.sum() > 0:
 
-                # First we ensure that each matching set has two cells; if a cell that divided matches to a cell that doesn't divide, we discard it
-                div_match_gt_parents = gt_parents_t[match_rows_track][div_matches]
+                if self.div_mode == 'sym':
+                    # First we ensure that each matching set has two cells; if a cell that divided matches to a cell that doesn't divide, we discard it
+                    div_match_gt_parents = gt_parents_t[match_rows_track][div_matches]
 
-                # If a gt cell divided at time t and only one daughter gt cell matched to a tracker cell then we can discard this match 
-                for div_match_gt_parent in np.unique(div_match_gt_parents):
-                    if (div_match_gt_parents == div_match_gt_parent).sum() != 2:
-                        div_matches[gt_parents_t[match_rows_track] == div_match_gt_parent] = False
+                    # If a gt cell divided at time t and only one daughter gt cell matched to a tracker cell then we can discard this match 
+                    for div_match_gt_parent in np.unique(div_match_gt_parents):
+                        if (div_match_gt_parents == div_match_gt_parent).sum() != 2:
+                            div_matches[gt_parents_t[match_rows_track] == div_match_gt_parent] = False
 
-                div_match_tracker_parents = tracker_parents_t[match_cols_track][div_matches]
+                    div_match_tracker_parents = tracker_parents_t[match_cols_track][div_matches]
 
-                # If a tracker cell divided at time t and only one daughter tracker cell matched to a gt cell then we can discard this match 
-                for div_match_tracker_parent in np.unique(div_match_tracker_parents):
-                    if (div_match_tracker_parents == div_match_tracker_parent).sum() != 2:
-                        div_matches[tracker_parents_t[match_cols_track] == div_match_tracker_parent] = False
+                    # If a tracker cell divided at time t and only one daughter tracker cell matched to a gt cell then we can discard this match 
+                    for div_match_tracker_parent in np.unique(div_match_tracker_parents):
+                        if (div_match_tracker_parents == div_match_tracker_parent).sum() != 2:
+                            div_matches[tracker_parents_t[match_cols_track] == div_match_tracker_parent] = False
 
-                # At this point, all sets of matching cells contain two cells both divided; Next need to check if they have matching parents
+                # At this point, all sets of matching cells contain valid division matches; Next need to check if they have matching parents
                 if div_matches.sum() > 0:
                     # Get all parent ids of matching cells; We use match_rows_track to remove cells that were used for flexible division for time t
                     # Cell involved in a flexilbe division from time t-1 will be included in match_rows_track and the parent cell id will be a number below as -10 as an easy way to identify
@@ -537,13 +546,61 @@ class HOTA(_BaseMetric):
                     # If matches are still left, calculate IOU overlap
                     if div_matches.sum() > 0:
 
-                        # Get IOU of cell divisions and reshape the array into Num_of_divs x 2
                         similarity_div = similarity[match_rows_track,match_cols_track][div_matches]
-                        assert similarity_div.shape[0] % 2 == 0
-                        similarity_div = np.array(np.split(similarity_div,similarity_div.shape[0] // 2))
-                            
-                        # Get the geometric mean of the iou between the two divided cells 
-                        iou_div = np.sqrt(np.prod(similarity_div,-1)) 
+
+                        if self.div_mode == 'sym':
+                            # Get IOU of cell divisions and reshape the array into Num_of_divs x 2
+                            assert similarity_div.shape[0] % 2 == 0
+                            similarity_div = np.array(np.split(similarity_div,similarity_div.shape[0] // 2))
+                                
+                            # Get the geometric mean of the iou between the two divided cells 
+                            iou_div = np.sqrt(np.prod(similarity_div,-1))
+                        else:
+                            # Asymmetric division: one child per parent, use max IoU per parent pair
+                            gt_div_parents = gt_parents_t[match_rows_track][div_matches]
+                            tracker_div_parents = tracker_parents_t[match_cols_track][div_matches]
+                            pair_to_max = {}
+                            for gt_p, tr_p, sim in zip(gt_div_parents, tracker_div_parents, similarity_div):
+                                key = (int(gt_p), int(tr_p))
+                                if key not in pair_to_max or sim > pair_to_max[key]:
+                                    pair_to_max[key] = sim
+                            div_pairs_gt = np.array([k[0] for k in pair_to_max.keys()], dtype=int)
+                            div_pairs_tr = np.array([k[1] for k in pair_to_max.keys()], dtype=int)
+                            iou_div = np.array(list(pair_to_max.values()), dtype=float)
+
+            # Asymmetric divisions: allow late matches within a window; use first frame where both children are present.
+            if self.div_mode == 'asym' and not late_div_found and div_matches.sum() == 0 and self.div_window > 0:
+                for df in range(1, self.div_window + 1):
+                    f = t + df
+                    if f >= len(data['gt_ids']):
+                        break
+                    gt_ids_f = data['gt_ids'][f]
+                    tr_ids_f = data['tracker_ids'][f]
+                    if len(gt_ids_f) == 0 or len(tr_ids_f) == 0:
+                        continue
+                    sim_f = data['similarity_scores'][f]
+                    score_mat_f = global_alignment_score[gt_ids_f[:, np.newaxis], tr_ids_f[np.newaxis, :]] * sim_f
+                    match_rows_f, match_cols_f = linear_sum_assignment(-score_mat_f)
+                    gt_parents_f = data['gt_parent'][f]
+                    tr_parents_f = data['tracker_parent'][f]
+                    div_matches_f = (gt_parents_f[match_rows_f] != -1) * (tr_parents_f[match_cols_f] != -1)
+                    if div_matches_f.sum() == 0:
+                        continue
+                    similarity_div_f = sim_f[match_rows_f, match_cols_f][div_matches_f]
+                    gt_div_parents_f = gt_parents_f[match_rows_f][div_matches_f]
+                    tr_div_parents_f = tr_parents_f[match_cols_f][div_matches_f]
+                    pair_to_max = {}
+                    for gt_p, tr_p, sim in zip(gt_div_parents_f, tr_div_parents_f, similarity_div_f):
+                        key = (int(gt_p), int(tr_p))
+                        if key not in pair_to_max or sim > pair_to_max[key]:
+                            pair_to_max[key] = sim
+                    if not pair_to_max:
+                        continue
+                    div_pairs_gt = np.array([k[0] for k in pair_to_max.keys()], dtype=int)
+                    div_pairs_tr = np.array([k[1] for k in pair_to_max.keys()], dtype=int)
+                    iou_div = np.array(list(pair_to_max.values()), dtype=float)
+                    late_div_found = True
+                    break
 
             num_trackers_match_to_gt_edges = (similarity[match_rows_orig[edges_match],match_cols_orig[edges_match]] > 0).sum()
 
@@ -640,6 +697,8 @@ class HOTA(_BaseMetric):
                                 matches_counts[a][gt_id, tracker_id] += 1
 
                 num_div_matches = 0
+                matched_gt_parents = set()
+                matched_tracker_parents = set()
 
                 if gt_num_divs == 0 and tracker_num_divs > 0:
                     res['Div_FP'][a] += tracker_num_divs
@@ -654,6 +713,10 @@ class HOTA(_BaseMetric):
 
                         # Add up total number of matches where a cell division occured
                         num_div_matches = (div_matches_alpha).sum()
+
+                        if self.div_mode == 'asym' and div_matches_alpha.sum() > 0:
+                            matched_gt_parents = set(div_pairs_gt[div_matches_alpha].tolist())
+                            matched_tracker_parents = set(div_pairs_tr[div_matches_alpha].tolist())
 
                     res['Div_TP'][a] += num_div_matches
                     res['Div_FN'][a] += gt_num_divs - num_div_matches
@@ -683,8 +746,12 @@ class HOTA(_BaseMetric):
                         if np.where(gt_parents_t == gt_parent_t_unique)[0][0] in flex_div_gt_keep_remove_ind:
                             continue
                         # we check that gt_parent_t_unique not a successful match
-                        if num_div_matches == 0 or gt_parent_t_unique not in gt_parents_t_match_unique or not div_matches_alpha[np.where(gt_parents_t_match_unique == gt_parent_t_unique)[0][0]]:
-                            res['Div_FN_ID'][t][a].extend(gt_ids_t[gt_parents_t == gt_parent_t_unique]) 
+                        if self.div_mode == 'asym':
+                            if gt_parent_t_unique not in matched_gt_parents:
+                                res['Div_FN_ID'][t][a].extend(gt_ids_t[gt_parents_t == gt_parent_t_unique])
+                        else:
+                            if num_div_matches == 0 or gt_parent_t_unique not in gt_parents_t_match_unique or not div_matches_alpha[np.where(gt_parents_t_match_unique == gt_parent_t_unique)[0][0]]:
+                                res['Div_FN_ID'][t][a].extend(gt_ids_t[gt_parents_t == gt_parent_t_unique]) 
 
                 # Budding datasets can yield a single child per parent; avoid enforcing a 2-child division invariant.
 
@@ -723,8 +790,12 @@ class HOTA(_BaseMetric):
                         if np.where(tracker_parents_t == tracker_parent_t_unique)[0][0] in flex_div_tracker_keep_remove_ind:
                             continue
                         # we check that tracker_parent_t_unique not a successful match
-                        if num_div_matches == 0 or tracker_parent_t_unique not in tracker_parents_t_match_unique or not div_matches_alpha[np.where(tracker_parents_t_match_unique == tracker_parent_t_unique)[0][0]]:
-                            res['Div_FP_ID'][t][a].extend(tracker_ids_t[tracker_parents_t == tracker_parent_t_unique]) 
+                        if self.div_mode == 'asym':
+                            if tracker_parent_t_unique not in matched_tracker_parents:
+                                res['Div_FP_ID'][t][a].extend(tracker_ids_t[tracker_parents_t == tracker_parent_t_unique])
+                        else:
+                            if num_div_matches == 0 or tracker_parent_t_unique not in tracker_parents_t_match_unique or not div_matches_alpha[np.where(tracker_parents_t_match_unique == tracker_parent_t_unique)[0][0]]:
+                                res['Div_FP_ID'][t][a].extend(tracker_ids_t[tracker_parents_t == tracker_parent_t_unique]) 
 
                 # Budding datasets can yield a single child per parent; avoid enforcing a 2-child division invariant.
 

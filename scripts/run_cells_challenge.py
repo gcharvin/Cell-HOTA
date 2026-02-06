@@ -58,7 +58,7 @@ if __name__ == '__main__':
     default_eval_config = trackeval.Evaluator.get_default_eval_config()
     default_eval_config['DISPLAY_LESS_PROGRESS'] = False
     default_dataset_config = trackeval.datasets.CellsChallenge.get_default_dataset_config()
-    default_metrics_config = {'METRICS': ['HOTA', 'CLEAR', 'Identity']}
+    default_metrics_config = {'METRICS': ['HOTA', 'CLEAR', 'Identity'], 'DIV_MODE': 'sym', 'DIV_WINDOW': 1}
     config = {**default_eval_config, **default_dataset_config, **default_metrics_config}  # Merge default configs
     
     parser = argparse.ArgumentParser()
@@ -129,7 +129,7 @@ if __name__ == '__main__':
     metrics_list = []
     for metric in [trackeval.metrics.HOTA]:
         if metric.get_name() in metrics_config['METRICS']:
-            metrics_list.append(metric(config['USE_FLEX_DIV']))
+            metrics_list.append(metric(config['USE_FLEX_DIV'], config.get('DIV_MODE', 'sym'), config.get('DIV_WINDOW', 1)))
     if len(metrics_list) == 0:
         raise Exception('No metrics selected for evaluation')
     evaluator.evaluate(dataset_list, metrics_list)
